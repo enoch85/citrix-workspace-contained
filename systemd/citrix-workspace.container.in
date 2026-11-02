@@ -1,0 +1,42 @@
+# Quadlet unit: generates citrix-workspace.service for the user's systemd instance.
+# Start it with `citrix-workspace start` (or the app launcher), which passes on the session's display.
+
+[Unit]
+Description=Citrix Workspace (contained)
+# Needs the desktop session's display, and stops when you log out.
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Container]
+Image=localhost/citrix-workspace
+Pull=never
+ContainerName=citrix-workspace
+RunInit=true
+UserNS=keep-id
+HostName=%H
+StopTimeout=5
+
+# Hardening. SELinux separation is off only so the container can use the X11 and audio sockets.
+DropCapability=all
+NoNewPrivileges=true
+SecurityLabelDisable=true
+
+# Everything shared with your session. Nothing else from your home folder is visible.
+Environment=DISPLAY
+Volume=%h/.local/state/citrix-workspace:/home/citrix
+Volume=/tmp/.X11-unix:/tmp/.X11-unix:ro
+Volume=%t/citrix-workspace/xauth:/tmp/xauth:ro
+Volume=%t/pulse/native:/tmp/pulse
+# GPU (sign-in window, video decoding) and webcams, when present.
+AddDevice=-/dev/dri
+AddDevice=-/dev/video0
+AddDevice=-/dev/video1
+AddDevice=-/dev/video2
+AddDevice=-/dev/video3
+# X11 shared memory (MIT-SHM) needs the host IPC namespace.
+PodmanArgs=--ipc=host
+
+[Service]
+# Checks Citrix for a newer release and rebuilds the image when needed (minutes, with a notification).
+ExecStartPre=@BINDIR@/citrix-workspace prepare
+TimeoutStartSec=30min

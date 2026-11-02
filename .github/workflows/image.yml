@@ -1,0 +1,35 @@
+# Builds the image's package stage with Buildah, to catch Fedora changes early.
+# Stops before Citrix is added, and publishes nothing.
+name: Image packages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - share/citrix-workspace/Containerfile
+      - .github/workflows/image.yml
+  pull_request:
+    paths:
+      - share/citrix-workspace/Containerfile
+      - .github/workflows/image.yml
+  schedule:
+    - cron: '17 4 * * 1'   # weekly, for Fedora updates
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: redhat-actions/buildah-build@719e3c40d8af9790c23eca13f7daa339f2867034 # v3.1.0
+        with:
+          image: citrix-workspace-packages
+          tags: check
+          containerfiles: share/citrix-workspace/Containerfile
+          context: share/citrix-workspace
+          oci: true
+          extra-args: --pull=newer --target=packages

@@ -1,0 +1,19 @@
+[Desktop Entry]
+Type=Application
+Name=Citrix Workspace (contained)
+Comment=Citrix Workspace app, isolated in its own container
+Exec=@BINDIR@/citrix-workspace start
+Icon=citrix-workspace
+Categories=Network;RemoteAccess;
+Keywords=citrix;vdi;remote;desktop;work;
+Terminal=false
+StartupWMClass=selfservice
+Actions=update;stop;
+
+[Desktop Action update]
+Name=Check for Updates
+Exec=@BINDIR@/citrix-workspace update
+
+[Desktop Action stop]
+Name=Stop Citrix Workspace
+Exec=@BINDIR@/citrix-workspace stop

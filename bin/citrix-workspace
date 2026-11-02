@@ -1,0 +1,117 @@
+#!/bin/bash
+# citrix-workspace: run the Citrix Workspace app in a rootless, isolated Podman container.
+# See README.md. Commands: start, stop, status, logs, update [--force], purge, prepare (used by systemd).
+set -euo pipefail
+
+NAME=citrix-workspace
+IMAGE=localhost/$NAME
+BASE_IMAGE=docker.io/library/fedora:latest
+SHARE=$(dirname "$(realpath "$0")")/../share/$NAME
+DATA=$HOME/.local/state/$NAME   # Citrix's home: kept apart from the program files in $SHARE
+CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/$NAME
+RUNTIME=${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is not set}/$NAME
+CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/$NAME/config
+EULA=https://www.cloud.com/content/dam/cloud/documents/legal/end-user-agreement.pdf
+
+# Settings: defaults, then the environment, then $CONFIG (see README.md).
+: "${ACCEPT_CITRIX_EULA:=no}"
+: "${CITRIX_PAGE:=https://www.citrix.com/downloads/workspace-app/linux/workspace-app-for-linux-latest.html}"
+: "${CITRIX_DEB:=}"
+: "${REFRESH_DAYS:=7}"
+# shellcheck source=/dev/null
+[ -f "$CONFIG" ] && . "$CONFIG"
+
+log()    { echo "$NAME: $*" >&2; }
+die()    { notify "$*"; exit 1; }   # also shown as a notification: started from the icon, there is no terminal
+notify() { log "$*"; command -v notify-send >/dev/null && notify-send -a "Citrix Workspace" "Citrix Workspace" "$*" 2>/dev/null || true; }
+# Without network or a new release we keep the current image; without any image there is nothing to run.
+keep()   { podman image exists "$IMAGE" && { notify "$*; keeping the current version."; exit 0; }; die "$*"; }
+label()  { podman image inspect -f "$1" "$IMAGE" 2>/dev/null || true; }
+inside() { podman exec "$NAME" pgrep -x "$1" >/dev/null 2>&1; }
+
+update() {
+  local page="" rel="" deb want have built base
+  if [ -n "$CITRIX_DEB" ]; then   # pinned, admin-approved package: no website, no download
+    [ -f "$CITRIX_DEB" ] || die "CITRIX_DEB not found: $CITRIX_DEB"
+    deb=$(realpath "$CITRIX_DEB")
+  else
+    [ "$ACCEPT_CITRIX_EULA" = yes ] || die "set ACCEPT_CITRIX_EULA=yes in $CONFIG after reading $EULA"
+    page=$(curl -fsSL --max-time 30 "$CITRIX_PAGE") || keep "cannot reach $CITRIX_PAGE"
+    rel=$(grep -oE '//downloads\.citrix\.com/[^"]*/icaclient_[^"/?]*_amd64\.deb[^"]*' <<<"$page" | head -1 | sed 's/&amp;/\&/g') || true
+    [ -n "$rel" ] || keep "no Debian amd64 package found on $CITRIX_PAGE"
+    deb=${rel%%\?*}; deb=$CACHE/${deb##*/}
+  fi
+  want=$(sed -nE 's/^icaclient_([0-9]+(\.[0-9]+){3})_amd64\.deb$/\1/p' <<<"${deb##*/}")
+  [ -n "$want" ] || die "expected icaclient_<version>_amd64.deb: $deb"
+  have=$(label '{{index .Labels "org.opencontainers.image.version"}}')
+  base=$(label '{{index .Labels "org.opencontainers.image.base.name"}}')
+  built=$(label '{{.Created.Unix}}')
+  if [ "${1:-}" != --force ] && [ "$want" = "$have" ] && [ "$base" = "$BASE_IMAGE" ] && (( $(date +%s) - ${built:-0} < REFRESH_DAYS * 86400 )); then
+    ${say:-log} "Citrix Workspace $have is up to date"; return
+  fi
+
+  if [ ! -f "$deb" ]; then
+    mkdir -p "$CACHE"
+    notify "Downloading ${deb##*/} from Citrix. This takes a few minutes."
+    curl -fL --retry 3 -o "$deb.part" "https:$rel" || keep "download failed"
+    # Citrix publishes a SHA-256 for every package on the same page; refuse anything else.
+    grep -qi "$(sha256sum "$deb.part" | cut -d' ' -f1)" <<<"$page" \
+      || { rm -f "$deb.part"; keep "SHA-256 of ${deb##*/} is not published by Citrix"; }
+    mv "$deb.part" "$deb"
+    find "$CACHE" -maxdepth 1 -name '*.deb' ! -name "${deb##*/}" -delete
+  fi
+
+  notify "Installing Citrix Workspace $want in its container. This takes a few minutes."
+  mkdir -p "$CACHE/context"
+  ln -f "$deb" "$CACHE/context/ICAClient.deb" 2>/dev/null || cp -f "$deb" "$CACHE/context/ICAClient.deb"
+  podman build --pull=newer --no-cache --security-opt label=disable --build-arg VERSION="$want" --build-arg BASE_IMAGE="$BASE_IMAGE" \
+    --build-context package="$CACHE/context" -t "$IMAGE" "$SHARE" || keep "image build failed"
+  rm -rf "$CACHE/context"
+  podman image prune -f >/dev/null
+  notify "Citrix Workspace $want is ready."
+}
+
+# Runs as ExecStartPre: hand the session's X11 credentials to the container, then update if needed.
+prepare() {
+  [ -n "${DISPLAY:-}" ] || die "no display; start it with \"$NAME start\" from your desktop session"
+  mkdir -p "$DATA" "$RUNTIME"
+  install -m 600 /dev/null "$RUNTIME/xauth"
+  local xauth=${XAUTHORITY:-$HOME/.Xauthority}
+  [ -r "$xauth" ] && cat "$xauth" > "$RUNTIME/xauth"
+  update
+}
+
+case ${1:-start} in
+  start)
+    # The icon gets clicked repeatedly: one start at a time, and never a second window.
+    mkdir -p "$RUNTIME"
+    exec 9>"$RUNTIME/start.lock"
+    flock -n 9 || { notify "Citrix Workspace is still starting."; exit 0; }
+    if systemctl --user -q is-active "$NAME"; then
+      if inside selfservice; then
+        notify "Citrix Workspace is already open."
+      elif inside wfica; then
+        exec podman exec -d "$NAME" selfservice >/dev/null 9>&-   # window closed during a session: reopen it
+      else
+        notify "Citrix Workspace is still starting."
+      fi
+      exit 0
+    fi
+    systemctl --user import-environment DISPLAY XAUTHORITY
+    systemctl --user start "$NAME" || die "could not start; run \"$NAME logs -e\" for details" ;;
+  stop)    exec systemctl --user stop "$NAME" ;;
+  status)  echo "Image: Citrix Workspace $(label '{{index .Labels "org.opencontainers.image.version"}}'), built $(label '{{.Created}}')"
+           exec systemctl --user status "$NAME" ;;
+  # --user-unit also finds the entries when the journal isn't split per user (RHEL's default).
+  logs)    shift; exec journalctl --user-unit "$NAME" "$@" ;;
+  update)  say=notify update "${2:-}" ;;   # asked for directly, so always answer; every start stays quiet
+  prepare) prepare ;;
+  purge)
+    systemctl --user stop "$NAME" 2>/dev/null || true
+    podman rmi -f "$IMAGE" 2>/dev/null || true
+    podman rmi "$BASE_IMAGE" 2>/dev/null || true
+    podman image prune -f >/dev/null || true
+    rm -rf "$DATA" "$CACHE" "$RUNTIME" "${CONFIG%/*}"
+    log "removed the image, settings, cache and downloads" ;;
+  *) log "usage: $NAME [start|stop|status|logs [-f]|update [--force]|purge]"; exit 1 ;;
+esac

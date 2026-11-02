@@ -1,0 +1,19 @@
+# ShellCheck and Quadlet generation on Fedora, which ships the Quadlet generator with Podman.
+name: Check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    container: docker.io/library/fedora:latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: dnf -y install --setopt=install_weak_deps=False make ShellCheck podman
+      - run: make check

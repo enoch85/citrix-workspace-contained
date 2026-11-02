@@ -1,0 +1,71 @@
+# The current Debian build uses WebKitGTK 4.1, available in current Fedora.
+# Extract the verified package without installing Debian packages into Fedora.
+ARG BASE_IMAGE=docker.io/library/fedora:latest
+FROM ${BASE_IMAGE} AS payload
+RUN dnf -y upgrade --refresh \
+ && dnf -y install --setopt=install_weak_deps=False dpkg \
+ && dnf clean all
+RUN --mount=type=bind,from=package,source=ICAClient.deb,target=/tmp/ICAClient.deb \
+    dpkg-deb --extract /tmp/ICAClient.deb /payload \
+ && cd /payload/opt/Citrix/ICAClient \
+ && ln -s ../nls/en/module.ini config/module.ini \
+ && ln -s ../nls/en/wfclient.template config/wfclient.template \
+ && ln -s ../nls/en/appsrv.template config/appsrv.template \
+ && ln -s ../nls/en/index.htm help/index.htm \
+ && ln -s nls/en.UTF-8/eula.txt eula.txt
+
+# Citrix's dependencies, without Citrix. CI builds this stage on its own as a check.
+FROM ${BASE_IMAGE} AS packages
+RUN dnf -y upgrade --refresh \
+ && dnf -y install --setopt=install_weak_deps=False \
+        ca-certificates bind-utils dbus-daemon procps-ng gtk2 gtk3 webkit2gtk4.1 \
+        libICE libSM libX11 libXext libXinerama libXmu libXpm libXrender libXt \
+        libpng libva libidn speexdsp sqlite-libs libsecret gnome-keyring net-tools \
+        mesa-dri-drivers mesa-va-drivers mesa-vulkan-drivers \
+        pulseaudio-libs alsa-plugins-pulseaudio dejavu-sans-fonts python3-gobject-base \
+ && dnf clean all \
+ && python3 -c 'import gi; gi.require_version("Secret", "1")'
+
+FROM packages
+ARG BASE_IMAGE
+ARG VERSION=unknown
+LABEL org.opencontainers.image.title="Citrix Workspace (contained)" \
+      org.opencontainers.image.version="$VERSION" \
+      org.opencontainers.image.base.name="$BASE_IMAGE"
+
+COPY --from=payload /payload/opt/Citrix/ICAClient /opt/Citrix/ICAClient
+COPY --from=payload /payload/etc/icaclient /etc/icaclient
+RUN set -eu; \
+    for f in selfservice wfica util/ctxcwalogd lib/UIDialogLib3.so lib/UIDialogLibWebKit3.so; do \
+        ldd "/opt/Citrix/ICAClient/$f" > /tmp/citrix-libraries; \
+        if grep -q 'not found' /tmp/citrix-libraries; then cat /tmp/citrix-libraries; exit 1; fi; \
+    done; \
+    rm /tmp/citrix-libraries; \
+    for f in config/module.ini config/wfclient.template config/appsrv.template eula.txt help/index.htm; do \
+        test -s "/opt/Citrix/ICAClient/$f"; \
+    done
+
+# Trust the system CAs in both Citrix's own store and its bundled curl.
+RUN ln -sf /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem /etc/ssl/certs/ca-certificates.crt \
+ && awk '/BEGIN CERT/{f=sprintf("%s/sys%03d.pem", d, ++n)} f{print > f} /END CERT/{close(f); f=""}' \
+        d=/opt/Citrix/ICAClient/keystore/cacerts /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
+ && /opt/Citrix/ICAClient/util/ctx_rehash /opt/Citrix/ICAClient/keystore/cacerts
+
+COPY --chmod=755 entrypoint.sh /usr/local/bin/citrix-entrypoint
+# NO_AT_BRIDGE: with no accessibility bus here, the GTK bridge crashes selfservice when WebKit opens a page.
+# Software rendering: with GPU rendering, WebKit shows only a white page.
+ENV ICAROOT=/opt/Citrix/ICAClient \
+    PATH=/opt/Citrix/ICAClient:$PATH \
+    HOME=/home/citrix \
+    LANG=C.UTF-8 \
+    SSL_CERT_FILE=/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
+    XAUTHORITY=/tmp/xauth \
+    PULSE_SERVER=unix:/tmp/pulse \
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/bus \
+    WEBKIT_DISABLE_COMPOSITING_MODE=1 \
+    WEBKIT_DISABLE_DMABUF_RENDERER=1 \
+    WEBKIT_SKIA_ENABLE_CPU_RENDERING=1 \
+    LIBGL_ALWAYS_SOFTWARE=1 \
+    NO_AT_BRIDGE=1
+WORKDIR /home/citrix
+CMD ["/usr/local/bin/citrix-entrypoint"]
